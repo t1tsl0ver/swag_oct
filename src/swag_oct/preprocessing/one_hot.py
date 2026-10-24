@@ -126,32 +126,38 @@ def load_csv(path: Path, *, labeled: bool) -> TabularData:
     target = np.empty(row_count, dtype=np.uint8) if labeled else None
 
     with path.open(newline="", encoding="utf-8-sig") as stream:
-        reader = csv.DictReader(stream)
+        reader = csv.reader(stream)
+        header = next(reader, None)
         expected = set(FEATURE_COLUMNS) | {"id"}
         if labeled:
             expected.add("satisfaction")
-        if not reader.fieldnames or set(reader.fieldnames) != expected:
-            missing = expected - set(reader.fieldnames or ())
-            extra = set(reader.fieldnames or ()) - expected
+        if header is None or set(header) != expected or len(header) != len(expected):
+            missing = expected - set(header or ())
+            extra = set(header or ()) - expected
             raise ValueError(f"Неверные столбцы {path.name}: нет {sorted(missing)}, лишние {sorted(extra)}")
+        positions = {name: index for index, name in enumerate(header)}
+        categorical_positions = [positions[name] for name in CATEGORICAL_COLUMNS]
+        numerical_positions = [positions[name] for name in NUMERICAL_COLUMNS]
 
         observed_rows = 0
         for index, row in enumerate(reader):
             if index >= row_count:
                 raise ValueError(f"Число CSV-записей превышает число строк файла: {path}")
+            if len(row) != len(header):
+                raise ValueError(f"Неверное число столбцов в {path.name}, строка {index + 2}")
             observed_rows += 1
-            ids[index] = int(row["id"])
-            for column_index, name in enumerate(CATEGORICAL_COLUMNS):
-                raw = row[name].strip()
+            ids[index] = int(row[positions["id"]])
+            for column_index, position in enumerate(categorical_positions):
+                raw = row[position].strip()
                 codes[index, column_index] = CATEGORY_MAPS[column_index].get(raw, len(CATEGORY_VALUES[column_index]))
-            for column_index, name in enumerate(NUMERICAL_COLUMNS):
-                raw = row[name].strip()
+            for column_index, position in enumerate(numerical_positions):
+                raw = row[position].strip()
                 value = float(raw) if raw else np.nan
                 if np.isinf(value):
-                    raise ValueError(f"Бесконечное значение в {name}, строка {index + 2}")
+                    raise ValueError(f"Бесконечное значение в {NUMERICAL_COLUMNS[column_index]}, строка {index + 2}")
                 numerical[index, column_index] = value
             if target is not None:
-                label = row["satisfaction"].strip().lower()
+                label = row[positions["satisfaction"]].strip().lower()
                 if label not in ("true", "false", "1", "0"):
                     raise ValueError(f"Неизвестная метка satisfaction: {label!r}")
                 target[index] = label in ("true", "1")
@@ -162,16 +168,16 @@ def load_csv(path: Path, *, labeled: bool) -> TabularData:
 
 
 def encode_one_hot(data: TabularData, indices: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
-    """Expand fixed category codes to one-hot for selected rows or a batch."""
+    """Expand fixed category codes to compact uint8 one-hot rows or a batch."""
     selected = _indices(data, indices)
-    result = np.zeros((len(selected), ONE_HOT_WIDTH), dtype=np.float32)
+    result = np.zeros((len(selected), ONE_HOT_WIDTH), dtype=np.uint8)
     row_positions = np.arange(len(selected))
     offset = 0
     for column_index, values in enumerate(CATEGORY_VALUES):
         column_codes = data.categorical_codes[selected, column_index]
         if len(column_codes) and column_codes.max() > len(values):
             raise ValueError(f"Недопустимый код категории: {CATEGORICAL_COLUMNS[column_index]}")
-        result[row_positions, offset + column_codes] = 1.0
+        result[row_positions, offset + column_codes] = 1
         offset += len(values) + 1
     return result
 
@@ -247,18 +253,23 @@ class OneHotPreprocessor:
     ) -> np.ndarray:
         """Return float32 NN input; optionally reuse a cached one-hot matrix."""
         selected = _indices(data, indices)
+        result = np.empty((len(selected), self.output_dim), dtype=np.float32)
         if one_hot is None:
-            categorical = encode_one_hot(data, selected)
+            result[:, :ONE_HOT_WIDTH] = encode_one_hot(data, selected)
         elif one_hot.ndim != 2 or one_hot.shape[1] != ONE_HOT_WIDTH:
             raise ValueError("Неверная ширина кэшированной one-hot матрицы")
         elif len(one_hot) == data.row_count:
-            categorical = one_hot[selected]
+            # Advanced indexing creates a temporary array. Bounded chunks keep
+            # memory use stable when transforming a whole training fold.
+            for start in range(0, len(selected), 65536):
+                end = min(start + 65536, len(selected))
+                result[start:end, :ONE_HOT_WIDTH] = one_hot[selected[start:end]]
         elif len(one_hot) == len(selected):
-            categorical = one_hot
+            result[:, :ONE_HOT_WIDTH] = one_hot
         else:
             raise ValueError("Число строк one-hot матрицы не совпало с данными")
-        numerical = self.transform_numerical(data, selected)
-        return np.concatenate((categorical, numerical), axis=1)
+        result[:, ONE_HOT_WIDTH:] = self.transform_numerical(data, selected)
+        return result
 
 
 def main() -> None:
