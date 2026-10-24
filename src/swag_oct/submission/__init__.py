@@ -1,0 +1,1 @@
+"""Competition submission file creation."""

@@ -9,3 +9,7 @@ __pycache__/
 /data/*
 !/data/README.md
 /experiments/*.html
+/experiments/*.log
+/experiments/*.npz
+/submissions/*.csv
+/submissions/*.tmp
