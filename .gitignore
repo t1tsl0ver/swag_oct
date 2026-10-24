@@ -1,0 +1,11 @@
+.venv/
+.idea/
+.kaggle/
+.env
+kaggle.json
+access_token
+__pycache__/
+*.py[cod]
+/data/*
+!/data/README.md
+/experiments/*.html
